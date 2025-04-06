@@ -341,7 +341,7 @@ def main():
         st.error(f"Prediction failed: {e}")
 
       st.subheader("📊 Counterfactual Analysis: How to Improve")
-      st.info("Which features, if changed, could reduce your stress prediction?")
+      st.info("Which features, if changed, could impact your stress outcome?")
 
       # all_cf_df = generate_counterfactual_for_instance(
       #   model=modelRandomForest,
