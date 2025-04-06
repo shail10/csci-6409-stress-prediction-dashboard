@@ -92,6 +92,39 @@ def user_input_features():
 
     return pd.DataFrame([data])
 
+def decode_one_hot_to_categorical(df_counterfactual_one_hot):
+    """
+    Decodes a one-hot encoded dataset back to categorical values based on the column names.
+    Handles column names with multiple underscores.
+
+    Parameters:
+    df_counterfactual_one_hot (pd.DataFrame): The one-hot encoded counterfactual dataset.
+
+    Returns:
+    pd.DataFrame: A DataFrame with the counterfactual values decoded back to their original categorical format.
+    """
+    
+    # Initialize an empty DataFrame to store decoded counterfactual values
+    decoded_df = pd.DataFrame(index=df_counterfactual_one_hot.index)
+    
+    # Iterate over columns to decode based on the pattern
+    for col in df_counterfactual_one_hot.columns:
+        # Try to extract the category name based on the naming convention
+        # We will find the first occurrence of an underscore after the first part of the column name
+        category_name = '_'.join(col.split('_')[:-1])  # Take everything except the last part as category name
+        
+        if category_name not in decoded_df.columns:
+            # Get the one-hot encoded columns related to the same original category
+            one_hot_cols = [col for col in df_counterfactual_one_hot.columns if col.startswith(category_name)]
+            
+            if one_hot_cols:
+                # Find the index of the '1' (encoded value) for each row
+                decoded_values = df_counterfactual_one_hot[one_hot_cols].idxmax(axis=1)
+                # Clean up the column name to retrieve the actual category value
+                decoded_values = decoded_values.str.replace(f"{category_name}_", "")
+                decoded_df[category_name] = decoded_values
+    
+    return decoded_df
 
 def generate_counterfactual_for_instance(model, input_instance, dataset_path, target_col='Growing_Stress', cfs_per_class=1):
 
@@ -114,12 +147,11 @@ def generate_counterfactual_for_instance(model, input_instance, dataset_path, ta
   dice_model = dice_ml.Model(model=model, backend="sklearn")
   explainer = dice_ml.Dice(dice_data, dice_model, method="random")
 
-  # Get current prediction
   original_pred = model.predict(input_instance.loc[0].to_frame().T,)[0]
+  print(original_pred)
   possible_classes = [0, 1, 2]
   desired_classes = [cls for cls in possible_classes if cls != original_pred]
 
-  # Generate counterfactuals
   all_counterfactuals = []
   for desired_class in desired_classes:
     cf = explainer.generate_counterfactuals(
@@ -131,24 +163,14 @@ def generate_counterfactual_for_instance(model, input_instance, dataset_path, ta
     cf_df = cf.cf_examples_list[0].final_cfs_df
     all_counterfactuals.append(cf_df)
 
-  # Combine all counterfactuals
   all_cf_df = pd.concat(all_counterfactuals, ignore_index=True)
 
   return all_cf_df
 
+  # return all_cf_df
+
 
 def multiclass_counterfactual_analysis_all_models(model, dataset_path, X_test, num_samples=50, cfs_per_instance=2, target_col='Growing_Stress'):
-    """
-    Generates model-level counterfactual analysis for all models in models_dict.
-
-    Args:
-        num_samples: Number of test samples to use.
-        cfs_per_instance: Counterfactuals generated per desired class.
-        target_col: Target column name.
-
-    Returns:
-        Dictionary of DataFrames containing counterfactual feature summaries per model.
-    """
     categorical_features = [col for col in X_test.columns]
 
     results_summary = {}
@@ -201,6 +223,90 @@ def multiclass_counterfactual_analysis_all_models(model, dataset_path, X_test, n
 
     return results_summary
 
+def aggregate_feature_summaries(feature_summaries):
+    aggregated_dict = {}
+
+    for model_name, summary_df in feature_summaries.items():
+        aggregated = {}
+
+        for feature in summary_df.index:
+            # Try splitting only the last part after last underscore
+            if '_' in feature:
+                base = '_'.join(feature.split('_')[:-1])
+            else:
+                base = feature
+
+            if base in aggregated:
+                aggregated[base] += summary_df.loc[feature, 'change_count']
+            else:
+                aggregated[base] = summary_df.loc[feature, 'change_count']
+
+        # Convert to DataFrame
+        agg_df = pd.DataFrame.from_dict(aggregated, orient='index', columns=['aggregated_change_count'])
+        total = agg_df['aggregated_change_count'].sum()
+        agg_df['aggregated_change_frequency'] = agg_df['aggregated_change_count'] / total
+        agg_df.sort_values('aggregated_change_frequency', ascending=False, inplace=True)
+
+        aggregated_dict[model_name] = agg_df
+
+    return aggregated_dict
+
+
+def plot_feature_summary_for_random_forest(feature_summaries):
+    """
+    Creates a bar plot for aggregated count and frequency for RandomForest using Plotly.
+    
+    Parameters:
+    feature_summaries (dict or pd.DataFrame): The aggregated feature summaries.
+    """
+    
+    # Aggregate the feature summaries
+    aggregated_summary = aggregate_feature_summaries(feature_summaries)
+    
+    # Extract the RandomForest data (assuming it's in a dictionary or DataFrame)
+    random_forest_data = aggregated_summary['RandomForest']
+    
+    # Create a DataFrame to better handle plotting
+    df = pd.DataFrame(random_forest_data)
+    
+    # Check if 'count' and 'frequency' columns exist
+    if 'aggregated_change_count' in df.columns and 'aggregated_change_frequency' in df.columns:
+        # Set the x-axis as feature names or indices
+        features = df.index
+        
+        # Create the bar trace for 'count'
+        count_trace = go.Bar(
+            x=features,
+            y=df['aggregated_change_count'],
+            name='Count',
+            opacity=0.7
+        )
+        
+        # Create the line trace for 'frequency'
+        frequency_trace = go.Scatter(
+            x=features,
+            y=df['aggregated_change_frequency'],
+            name='Frequency',
+            mode='lines+markers',
+            line=dict(color='red', width=2)
+        )
+        
+        # Create the layout with labels and title
+        layout = go.Layout(
+            title='Aggregated Count and Frequency for RandomForest',
+            xaxis=dict(title='Features', tickangle=45),
+            yaxis=dict(title='Values'),
+            barmode='group'
+        )
+        
+        # Create the figure and add traces
+        fig = go.Figure(data=[count_trace, frequency_trace], layout=layout)
+        
+        # Show the plot
+        st.plotly_chart(fig)
+    else:
+        print("The expected 'count' and 'frequency' columns were not found in the RandomForest data.")
+
 
 # --- Main app ---
 def main():
@@ -213,8 +319,6 @@ def main():
     if st.button("🔍 Predict Stress"):
       st.write('Your Input:- ')
       st.write(input_df)
-        # Note: model expects input to be preprocessed/encoded like during training
-        # Assuming model can handle categorical inputs directly or preprocessing is handled
       try:
         prediction = modelRandomForest.predict(processed_input)[0]
         prediction_proba = modelRandomForest.predict_proba(processed_input)[0]
@@ -239,14 +343,14 @@ def main():
       st.subheader("📊 Counterfactual Analysis: How to Improve")
       st.info("Which features, if changed, could reduce your stress prediction?")
 
-    # all_cf_df = generate_counterfactual_for_instance(
-    #   model=modelRandomForest,
-    #   input_instance=preprocess_input(input_df),
-    #   dataset_path="MentalHealthDataEncoded.csv", 
-    #   target_col="Growing_Stress",
-    #   cfs_per_class=2
-    # )
-    # st.dataframe(all_cf_df)
+      # all_cf_df = generate_counterfactual_for_instance(
+      #   model=modelRandomForest,
+      #   input_instance=preprocess_input(input_df),
+      #   dataset_path="MentalHealthDataEncoded.csv", 
+      #   target_col="Growing_Stress",
+      #   cfs_per_class=2,
+      # )
+      # st.dataframe(all_cf_df)
 
       feature_summaries = multiclass_counterfactual_analysis_all_models(
         model=modelRandomForest,
@@ -257,10 +361,13 @@ def main():
         target_col='Growing_Stress'
       )
 
-      st.dataframe(feature_summaries['RandomForest'])
+      # st.dataframe(feature_summaries['RandomForest'])
+      st.dataframe(aggregate_feature_summaries(feature_summaries)['RandomForest'])
 
-    # df = pd.read_csv(processed_input)
-    # st.dataframe(processed_input)
+      plot_feature_summary_for_random_forest(feature_summaries)
+
+      # df = pd.read_csv(processed_input)
+      # st.dataframe(processed_input)
 
 if __name__ == '__main__':
     main()
